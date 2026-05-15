@@ -367,8 +367,11 @@ function playPad(chordNotes, startTime, duration) {
 
 // ─── SCHEDULER ──────────────────────────────────────
 // Each "bar" = 8 beats (2 bars of 4/4)
-const SCHEDULE_AHEAD = 0.15; // seconds
-const SCHEDULE_INTERVAL = 50; // ms
+// FIX 1: SCHEDULE_AHEAD must be larger than SCHEDULE_INTERVAL so the
+//         while-loop always has a window to schedule into. 0.15s < 50ms
+//         interval on a loaded page = silent. Set to 0.6s.
+const SCHEDULE_AHEAD    = 0.6;  // seconds look-ahead (was 0.15 — too small)
+const SCHEDULE_INTERVAL = 50;   // ms poll interval
 
 let barCount = 0;
 
@@ -376,16 +379,12 @@ function scheduleBar(barStartTime) {
   const b = BEAT;
 
   // ── DRUMS (4/4 pattern over 2 bars = 8 beats) ──
-  // Kick:  1 . . . 1 . . .  (beats 0,4)
-  // Snare: . . 1 . . . 1 .  (beats 2,6)
-  // Hat:   1/8th notes
   for (let bar = 0; bar < 2; bar++) {
     const bt = barStartTime + bar * 4 * b;
     playKick(bt);
     playKick(bt + 2.5 * b);  // syncopated kick
     playSnare(bt + 2 * b);
     playSnare(bt + 3.5 * b); // ghost snare
-    // 8th-note hats
     for (let h = 0; h < 8; h++) {
       playHat(bt + h * 0.5 * b, h === 4);
     }
@@ -397,7 +396,7 @@ function scheduleBar(barStartTime) {
     playNote(n.note, barStartTime + n.beat * b, n.dur * b, 0.15, 'sine', -5);
   });
 
-  // ── MELODY (every other bar to give it room to breathe) ──
+  // ── MELODY (every other scheduling unit) ──
   if (barCount % 2 === 0) {
     melPattern.forEach(n => {
       playNote(n.note, barStartTime + n.beat * b, n.dur * b, 0.18, 'square', 0);
@@ -405,7 +404,7 @@ function scheduleBar(barStartTime) {
     });
   }
 
-  // ── PADS (one chord every 2 beats) ──
+  // ── PADS ──
   for (let i = 0; i < 4; i++) {
     playPad(padChords[i], barStartTime + i * 2 * b, 2.2 * b);
   }
@@ -414,7 +413,7 @@ function scheduleBar(barStartTime) {
 }
 
 function scheduler() {
-  const barDuration = 8 * BEAT; // 2 bars per scheduling unit
+  const barDuration = 8 * BEAT;
   while (nextNoteTime < audioCtx.currentTime + SCHEDULE_AHEAD) {
     scheduleBar(nextNoteTime);
     nextNoteTime += barDuration;
@@ -424,20 +423,36 @@ function scheduler() {
 function startMusic() {
   if (musicMuted) return;
   initAudio();
-  if (audioCtx.state === 'suspended') audioCtx.resume();
   if (musicStarted) return;
   musicStarted = true;
-
-  nextNoteTime = audioCtx.currentTime + 0.1;
   barCount = 0;
 
-  // Fade master in over 2 seconds
-  masterGain.gain.cancelScheduledValues(audioCtx.currentTime);
-  masterGain.gain.setValueAtTime(0, audioCtx.currentTime);
-  masterGain.gain.linearRampToValueAtTime(0.72, audioCtx.currentTime + 2.0);
+  // FIX 2: Always await resume() via Promise before starting the scheduler.
+  //         On Safari and many mobile browsers, AudioContext starts suspended
+  //         even after a user gesture. Notes scheduled on a suspended context
+  //         are silently discarded.
+  const doStart = () => {
+    // FIX 3: Start nextNoteTime well ahead of currentTime so the first
+    //         scheduler tick has a full window to populate. 0.1s was too
+    //         close — on a slow network tick it arrived after currentTime+0.1
+    //         had already passed, so scheduleBar was never called.
+    nextNoteTime = audioCtx.currentTime + 0.3;
 
-  schedulerTimer = setInterval(scheduler, SCHEDULE_INTERVAL);
-  document.getElementById('viz').classList.remove('paused');
+    masterGain.gain.cancelScheduledValues(audioCtx.currentTime);
+    masterGain.gain.setValueAtTime(0, audioCtx.currentTime);
+    masterGain.gain.linearRampToValueAtTime(0.82, audioCtx.currentTime + 1.5);
+
+    // Run once immediately, then on interval
+    scheduler();
+    schedulerTimer = setInterval(scheduler, SCHEDULE_INTERVAL);
+    document.getElementById('viz').classList.remove('paused');
+  };
+
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume().then(doStart).catch(doStart);
+  } else {
+    doStart();
+  }
 }
 
 function stopMusic(fade=true) {
